@@ -21,8 +21,12 @@ from PySide6.QtWidgets import (
 class DNSProfile:
     name: str
     primary: str
-    secondary: str
+    secondary: Optional[str]
     doh: Optional[str] = None
+
+    @property
+    def servers(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(ip for ip in (self.primary, self.secondary) if ip))
 
 
 PROFILES = [
@@ -49,6 +53,18 @@ PROFILES = [
         "45.155.204.190",
         "37.230.192.51",
         None,  # DoH не включаем без подтверждённого шаблона
+    ),
+    DNSProfile(
+        "dns.bezmezhau.com",
+        "143.20.64.55",
+        "31.58.216.201",
+        "https://dns.bezmezhau.com/dns-query",
+    ),
+    DNSProfile(
+        "dns.mafioznik.xyz",
+        "103.27.157.38",
+        None,  # Единственный подтверждённый IPv4; чужой резервный DNS не добавляем.
+        "https://dns.mafioznik.xyz/dns-query",
     ),
 ]
 
@@ -115,8 +131,9 @@ def get_dns_servers(adapter: str):
 
 def set_dns(adapter: str, profile: DNSProfile, enable_doh: bool):
     safe = adapter.replace("'", "''")
-    servers = f'@("{profile.primary}","{profile.secondary}")'
+    servers = '@(' + ','.join(f'"{ip}"' for ip in profile.servers) + ')'
     script = f"""
+$ErrorActionPreference = 'Stop'
 Set-DnsClientServerAddress -InterfaceAlias '{safe}' -ServerAddresses {servers}
 """
     rc, out, err = run_ps(script)
@@ -124,7 +141,7 @@ Set-DnsClientServerAddress -InterfaceAlias '{safe}' -ServerAddresses {servers}
         raise RuntimeError(err or "Не удалось изменить DNS.")
 
     if enable_doh and profile.doh:
-        for ip in (profile.primary, profile.secondary):
+        for ip in profile.servers:
             # Удаляем старую запись шифрования, если она существует.
             subprocess.run(
                 ["netsh", "dnsclient", "delete", "encryption", f"server={ip}"],
@@ -146,8 +163,12 @@ Set-DnsClientServerAddress -InterfaceAlias '{safe}' -ServerAddresses {servers}
                 errors="replace",
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            # Некоторые сборки Windows могут не поддерживать эту команду.
-            # DNS при этом уже применён обычным способом, поэтому не считаем это фатальной ошибкой.
+            if cp.returncode != 0:
+                raise RuntimeError(
+                    f"DNS {profile.name} применён, но Windows не смогла включить DoH "
+                    f"для {ip}. Проверьте поддержку DoH или выключите DoH в программе.\n"
+                    + (cp.stderr.strip() or cp.stdout.strip())
+                )
 
     subprocess.run(
         ["ipconfig", "/flushdns"],
@@ -155,6 +176,14 @@ Set-DnsClientServerAddress -InterfaceAlias '{safe}' -ServerAddresses {servers}
         text=True,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
+
+    actual = get_dns_servers(adapter)
+    if actual != list(profile.servers):
+        raise RuntimeError(
+            "Windows не подтвердила выбранный DNS. "
+            f"Ожидалось: {', '.join(profile.servers)}; "
+            f"получено: {', '.join(actual) or 'нет данных'}."
+        )
 
 
 def set_dhcp(adapter: str):
@@ -206,9 +235,7 @@ class TestWorker(QObject):
 
     def run(self):
         for p in PROFILES:
-            t1 = dns_latency(p.primary)
-            t2 = dns_latency(p.secondary)
-            vals = [x for x in (t1, t2) if x is not None]
+            vals = [value for ip in p.servers if (value := dns_latency(ip)) is not None]
             best = min(vals) if vals else None
             self.result.emit(p.name, best)
         self.finished.emit()
@@ -283,7 +310,7 @@ class MainWindow(QMainWindow):
             self.group.addButton(radio, i)
             row.addWidget(radio, 1)
 
-            ips = QLabel(f"{p.primary} / {p.secondary}")
+            ips = QLabel(" / ".join(p.servers))
             ips.setStyleSheet("color:#8592a8; font-size:11px;")
             row.addWidget(ips)
 
@@ -373,7 +400,7 @@ class MainWindow(QMainWindow):
         text = ", ".join(servers)
         matched = None
         for p in PROFILES:
-            if p.primary in servers or p.secondary in servers:
+            if any(ip in servers for ip in p.servers):
                 matched = p.name
                 break
         self.current_dns.setText(f"{matched} — {text}" if matched else text)

@@ -24,7 +24,8 @@ if exist "SPAIK-DNS-SWITCHER.spec" del /q "SPAIK-DNS-SWITCHER.spec"
 if errorlevel 1 goto FAIL
 call ".venv\Scripts\activate.bat"
 python -m pip install --upgrade pip
-python -m pip install PySide6 PyInstaller
+python -m pip install -r requirements.txt PyInstaller
+if errorlevel 1 goto FAIL
 python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name "SPAIK-DNS-SWITCHER" main.py
 if errorlevel 1 goto FAIL
 

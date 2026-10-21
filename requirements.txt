@@ -1,2 +1,3 @@
-PySide6>=6.7,<7
+# Tested with the Windows one-file build; keep Qt DLLs reproducible.
+PySide6==6.8.3
 
